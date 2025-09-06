@@ -226,24 +226,35 @@ map_prepare:
 
     mov w3, #0x201F
     movk w3, #0xD503, lsl#16
-    orr w1, w3, #0x100
-    mov w2, #0xFFFFFD1F
+    // w1 = w3 | 0x100 -> 0xD503211F
+    mov w1, w3
+    orr w1, w1, #0x100
+
+    // mask = 0xFFFFFF1F  (create via movn/movk for assembler-safety)
+    mov w2, #0xFF1F             // Lower Bits
+    movk w2, #0xFFFF, lsl#16    // yields 0xFFFFFF1F
     and w0, w12, w2
-    // if ((map_data.paging_init_backup & 0xFFFFFD1F) == 0xD503211F)
+    // if ((map_data.paging_init_backup & 0xFFFFFF1F) == 0xD503211F)
     cmp w0, w1
     b.ne .backup
     // map_data.paging_init_backup = NOP
     mov w12, w3
     // uint32_t *p = (uint32_t *)paging_init_pa + 1;
     add x11, x13, #4
+    add x12, x13, #0x360 // limit
 .cmp_auti:
-    // while ((*p & 0xFFFFFD1F) != 0xD503211F) ++p;
+    cmp x11, x12        // Check limit
+    b.hs .backup
+    // while ((*p & 0xFFFFFF1F) != 0xD503211F) ++p;
     ldr w0, [x11], #4
     and w0, w0, w2
     cmp w0, w1
     b.ne .cmp_auti
     // *p = NOP
-    stur w3, [x11, #-4]
+    // store NOP: store at previous address (x11 has been incremented)
+    // previous address is x11 - 4
+    sub x10, x11, #4
+    str w3, [x10]              // aligned store (immediate 0 is valid)
 
 .backup:
     str w12, [x9, #map_paging_init_backup_offset]
