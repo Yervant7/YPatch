@@ -19,6 +19,7 @@
 #include <linux/pid.h>
 #include <linux/sched.h>
 #include <linux/security.h>
+#include <uapi/linux/limits.h>
 #include <syscall.h>
 #include <accctl.h>
 #include <module.h>
@@ -31,11 +32,16 @@
 #include <linux/random.h>
 #include <sucompat.h>
 #include <accctl.h>
-#include <kstorage.h>
 
 #define MAX_KEY_LEN 128
 
 #include <linux/umh.h>
+
+// Android feature headers
+#ifdef ANDROID
+#include <hide_files.h>
+#include <spoof_uname.h>
+#endif
 
 static long call_test(long arg1, long arg2, long arg3)
 {
@@ -172,6 +178,43 @@ static long call_skey_root_enable(int enable)
     return 0;
 }
 
+#ifdef ANDROID
+static long call_hide_file_add(const char *__user upath)
+{
+    char *path = strndup_user(upath, PATH_MAX);
+    if (IS_ERR(path)) return PTR_ERR(path);
+    
+    int rc = add_hide_file(path);
+    kvfree(path);
+    return rc;
+}
+
+static long call_hide_file_remove(const char *__user upath)
+{
+    char *path = strndup_user(upath, PATH_MAX);
+    if (IS_ERR(path)) return PTR_ERR(path);
+    
+    int rc = remove_hide_file(path);
+    kvfree(path);
+    return rc;
+}
+
+static long call_spoof_uname_set(int type, const char *__user uvalue)
+{
+    char *value = strndup_user(uvalue, 64); // Uname fields are typically small
+    if (IS_ERR(value)) return PTR_ERR(value);
+    
+    int rc = add_spoof_uname(type, value);
+    kvfree(value);
+    return rc;
+}
+
+static long call_spoof_uname_remove(int type)
+{
+    return remove_spoof_uname(type);
+}
+#endif
+
 static long call_grant_uid(struct su_profile *__user uprofile)
 {
     struct su_profile *profile = memdup_user(uprofile, sizeof(struct su_profile));
@@ -240,24 +283,9 @@ static long call_su_set_allow_sctx(char *__user usctx)
     return set_all_allow_sctx(buf);
 }
 
-static long call_kstorage_read(int gid, long did, void *out_data, int offset, int dlen)
+static long call_set_exclude_list(uid_t uid, int exclude)
 {
-    return read_kstorage(gid, did, out_data, offset, dlen, true);
-}
-
-static long call_kstorage_write(int gid, long did, void *data, int offset, int dlen)
-{
-    return write_kstorage(gid, did, data, offset, dlen, true);
-}
-
-static long call_list_kstorage_ids(int gid, long *ids, int ids_len)
-{
-    return list_kstorage_ids(gid, ids, ids_len, false);
-}
-
-static long call_kstorage_remove(int gid, long did)
-{
-    return remove_kstorage(gid, did);
+    return set_ap_mod_exclude(uid, exclude);
 }
 
 static long supercall(int is_key_auth, long cmd, long arg1, long arg2, long arg3, long arg4)
@@ -300,20 +328,22 @@ static long supercall(int is_key_auth, long cmd, long arg1, long arg2, long arg3
         return call_su_get_allow_sctx((char *__user)arg1, (int)arg2);
     case SUPERCALL_SU_SET_ALLOW_SCTX:
         return call_su_set_allow_sctx((char *__user)arg1);
-
-    case SUPERCALL_KSTORAGE_READ:
-        return call_kstorage_read((int)arg1, (long)arg2, (void *)arg3, (int)((long)arg4 >> 32), (long)arg4 << 32 >> 32);
-    case SUPERCALL_KSTORAGE_WRITE:
-        return call_kstorage_write((int)arg1, (long)arg2, (void *)arg3, (int)((long)arg4 >> 32),
-                                   (long)arg4 << 32 >> 32);
-    case SUPERCALL_KSTORAGE_LIST_IDS:
-        return call_list_kstorage_ids((int)arg1, (long *)arg2, (int)arg3);
-    case SUPERCALL_KSTORAGE_REMOVE:
-        return call_kstorage_remove((int)arg1, (long)arg2);
+    case SUPERCALL_SET_EXCLUDE_LIST:
+        return call_set_exclude_list((uid_t)arg1, (int)arg2);
+    case SUPERCALL_IS_UID_EXCLUDED:
+        return is_uid_excluded_fast((uid_t)arg1);
 
 #ifdef ANDROID
     case SUPERCALL_SU_GET_SAFEMODE:
         return call_su_get_safemode();
+    case SUPERCALL_ANDROID_HIDE_FILE_ADD:
+        return call_hide_file_add((const char *)arg1);
+    case SUPERCALL_ANDROID_HIDE_FILE_REMOVE:
+        return call_hide_file_remove((const char *)arg1);
+    case SUPERCALL_ANDROID_SPOOF_UNAME_SET:
+        return call_spoof_uname_set((int)arg1, (const char *)arg2);
+    case SUPERCALL_ANDROID_SPOOF_UNAME_REMOVE:
+        return call_spoof_uname_remove((int)arg1);
 #endif
     default:
         break;
@@ -367,6 +397,11 @@ static long supercall(int is_key_auth, long cmd, long arg1, long arg2, long arg3
 
 static void before(hook_fargs6_t *args, void *udata)
 {
+    uid_t uid = current_uid();
+    if (likely(is_uid_excluded_fast(uid))) {
+        return;
+    }
+
     const char *__user ukey = (const char *__user)syscall_argn(args, 0);
     long ver_xx_cmd = (long)syscall_argn(args, 1);
 
@@ -386,7 +421,6 @@ static void before(hook_fargs6_t *args, void *udata)
     if (!auth_superkey(key)) {
         is_key_auth = 1;
     } else if (!strcmp("su", key)) {
-        uid_t uid = current_uid();
         if (!is_su_allow_uid(uid)) return;
     } else {
         return;

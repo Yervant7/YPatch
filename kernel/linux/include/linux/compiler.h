@@ -22,7 +22,7 @@
  * with an explicit memory barrier or atomic instruction that provides the
  * required ordering.
  */
-
+/*
 #define READ_ONCE(x)                                \
     ({                                              \
         union                                       \
@@ -40,7 +40,7 @@
         __write_once_size(&(x), &__val, sizeof(__val)); \
         __val;                                          \
     })
-
+*/
 /*
  * Prevent the compiler from merging or refetching accesses.  The compiler
  * is also forbidden from reordering successive instances of ACCESS_ONCE(),

@@ -33,6 +33,10 @@
 #include <uapi/scdefs.h>
 #include <uapi/linux/stat.h>
 
+int hide_files_init();
+int hide_mounts_init();
+int spoof_uname_init();
+
 #define ORIGIN_RC_FILE "/system/etc/init/atrace.rc"
 #define REPLACE_RC_FILE "/dev/user_init.rc"
 
@@ -377,6 +381,15 @@ int android_user_init()
         ret |= rc;
         log_boot("hook input_handle_event rc: %d\n", rc);
     }
+
+    rc = hide_files_init();
+    log_boot("hide_files_init rc: %d\n", rc);
+
+    rc = hide_mounts_init();
+    log_boot("hide_mounts_init rc: %d\n", rc);
+
+    rc = spoof_uname_init();
+    log_boot("spoof_uname_init rc: %d\n", rc);
 
     return ret;
 }

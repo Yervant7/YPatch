@@ -49,7 +49,6 @@ int resolve_pt_regs();
 int supercall_install();
 void module_init();
 void syscall_init();
-int kstorage_init();
 int su_compat_init();
 
 #ifdef ANDROID
@@ -76,9 +75,6 @@ static void before_rest_init(hook_fargs4_t *args, void *udata)
 
     rc = supercall_install();
     log_boot("supercall_install done: %d\n", rc);
-
-    rc = kstorage_init();
-    log_boot("kstorage_init done: %d\n", rc);
 
     rc = su_compat_init();
     log_boot("su_compat_init done: %d\n", rc);

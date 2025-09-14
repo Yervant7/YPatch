@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* 
+/*
  * Copyright (C) 2023 bmax121. All Rights Reserved.
+ * Copyright (C) 2025 Yervant7. All Rights Reserved.
  */
 
 #include <linux/list.h>
@@ -30,14 +31,12 @@
 #include <linux/spinlock.h>
 #include <syscall.h>
 #include <predata.h>
-#include <predata.h>
 #include <kconfig.h>
 #include <linux/vmalloc.h>
 #include <sucompat.h>
 #include <symbol.h>
 #include <uapi/linux/limits.h>
-#include <predata.h>
-#include <kstorage.h>
+#include <linux/hashtable.h>
 
 const char sh_path[] = SH_PATH;
 const char default_su_path[] = SU_PATH;
@@ -49,20 +48,76 @@ const char apd_path[] = APD_PATH;
 
 static const char *current_su_path = 0;
 
-static int su_kstorage_gid = -1;
-static int exclude_kstorage_gid = -1;
+#define SU_HASH_BITS 8
+static DECLARE_HASHTABLE(su_hash_table, SU_HASH_BITS);
+static DEFINE_SPINLOCK(su_hash_lock);
+
+#define EXCLUDE_CACHE_START 10000
+#define EXCLUDE_CACHE_END   11000
+#define EXCLUDE_CACHE_SIZE  (EXCLUDE_CACHE_END - EXCLUDE_CACHE_START)
+
+static uint8_t exclude_direct_cache[EXCLUDE_CACHE_SIZE] = {0};
+static bool exclude_direct_enabled = false;
+
+#define EXCLUDE_HASH_BITS 6
+static DECLARE_HASHTABLE(exclude_hash_table, EXCLUDE_HASH_BITS);
+static DEFINE_SPINLOCK(exclude_hash_lock);
+
+struct su_entry {
+    uid_t uid;
+    struct su_profile profile;
+    struct hlist_node hnode;
+    struct rcu_head rcu_head;
+};
+
+struct exclude_entry {
+    uid_t uid;
+    int exclude;
+    struct hlist_node hnode;
+    struct rcu_head rcu_head;
+};
+
+static struct su_entry *find_su_entry(uid_t uid)
+{
+    struct su_entry *entry;
+    hash_for_each_possible_rcu(su_hash_table, entry, hnode, uid) {
+        if (entry->uid == uid)
+            return entry;
+    }
+    return NULL;
+}
+
+static struct exclude_entry *find_exclude_entry(uid_t uid)
+{
+    struct exclude_entry *entry;
+    hash_for_each_possible_rcu(exclude_hash_table, entry, hnode, uid) {
+        if (entry->uid == uid)
+            return entry;
+    }
+    return NULL;
+}
+
+static void exclude_entry_free(struct rcu_head *head)
+{
+    struct exclude_entry *entry = container_of(head, struct exclude_entry, rcu_head);
+    vfree(entry);
+}
+
+static void su_entry_free(struct rcu_head *head)
+{
+    struct su_entry *entry = container_of(head, struct su_entry, rcu_head);
+    vfree(entry);
+}
 
 int is_su_allow_uid(uid_t uid)
 {
+    struct su_entry *entry;
     int rc = 0;
     rcu_read_lock();
-    const struct kstorage *ks = get_kstorage(su_kstorage_gid, uid);
-    if (IS_ERR_OR_NULL(ks) || ks->dlen <= 0) goto out;
-
-    struct su_profile *profile = (struct su_profile *)ks->data;
-    rc = profile->uid == uid;
-
-out:
+    entry = find_su_entry(uid);
+    if (entry) {
+        rc = entry->profile.uid == uid;
+    }
     rcu_read_unlock();
     return rc;
 }
@@ -71,71 +126,107 @@ KP_EXPORT_SYMBOL(is_su_allow_uid);
 int su_add_allow_uid(uid_t uid, uid_t to_uid, const char *scontext)
 {
     if (!scontext) scontext = "";
-    struct su_profile profile = {
-        uid,
-        to_uid,
-    };
-    memcpy(profile.scontext, scontext, SUPERCALL_SCONTEXT_LEN);
-    int rc = write_kstorage(su_kstorage_gid, uid, &profile, 0, sizeof(struct su_profile), false);
-    logkfd("uid: %d, to_uid: %d, sctx: %s, rc: %d\n", uid, to_uid, scontext, rc);
-    return rc;
+
+    struct su_entry *entry = (struct su_entry *)vmalloc(sizeof(struct su_entry));
+    if (!entry)
+        return -ENOMEM;
+
+    memset(entry, 0, sizeof(struct su_entry));
+
+    entry->uid = uid;
+    entry->profile.uid = uid;
+    entry->profile.to_uid = to_uid;
+    memcpy(entry->profile.scontext, scontext, SUPERCALL_SCONTEXT_LEN);
+
+    su_remove_allow_uid(uid);
+
+    spin_lock(&su_hash_lock);
+    hash_add_rcu(su_hash_table, &entry->hnode, uid);
+    spin_unlock(&su_hash_lock);
+
+    logkfd("uid: %d, to_uid: %d, sctx: %s\n", uid, to_uid, scontext);
+    return 0;
 }
 KP_EXPORT_SYMBOL(su_add_allow_uid);
 
 int su_remove_allow_uid(uid_t uid)
 {
-    return remove_kstorage(su_kstorage_gid, uid);
+    struct su_entry *entry;
+
+    spin_lock(&su_hash_lock);
+    entry = find_su_entry(uid);
+    if (entry) {
+        hash_del_rcu(&entry->hnode);
+        spin_unlock(&su_hash_lock);
+        call_rcu(&entry->rcu_head, su_entry_free);
+        return 0;
+    }
+    spin_unlock(&su_hash_lock);
+    return -ENOENT;
 }
 KP_EXPORT_SYMBOL(su_remove_allow_uid);
 
 int su_allow_uid_nums()
 {
-    return kstorage_group_size(su_kstorage_gid);
+    int count = 0;
+    int bkt;
+    struct su_entry *entry;
+
+    rcu_read_lock();
+    hash_for_each_rcu(su_hash_table, bkt, entry, hnode) {
+        count++;
+    }
+    rcu_read_unlock();
+
+    return count;
 }
 KP_EXPORT_SYMBOL(su_allow_uid_nums);
 
-static int allow_uids_cb(struct kstorage *kstorage, void *udata)
+static int allow_uids_cb(struct su_entry *entry, void *udata)
 {
-    struct
-    {
+    struct {
         int is_user;
         uid_t *out_uids;
         int idx;
         int out_num;
-    } *up = (typeof(up))udata;
+    } *up = udata;
 
     if (up->idx >= up->out_num) {
         return -ENOBUFS;
     }
 
-    struct su_profile *profile = (struct su_profile *)kstorage->data;
-
     if (up->is_user) {
-        int cprc = compat_copy_to_user(up->out_uids + up->idx, &profile->uid, sizeof(uid_t));
+        int cprc = compat_copy_to_user(up->out_uids + up->idx, &entry->profile.uid, sizeof(uid_t));
         if (cprc <= 0) {
             logkfd("compat_copy_to_user error: %d", cprc);
             return cprc;
         }
     } else {
-        up->out_uids[up->idx] = profile->uid;
+        up->out_uids[up->idx] = entry->profile.uid;
     }
 
     up->idx++;
-
     return 0;
 }
 
 int su_allow_uids(int is_user, uid_t *out_uids, int out_num)
 {
-    struct
-    {
-        int iu;
-        uid_t *up;
+    struct {
+        int is_user;
+        uid_t *out_uids;
         int idx;
         int out_num;
     } udata = { is_user, out_uids, 0, out_num };
 
-    on_each_kstorage_elem(su_kstorage_gid, allow_uids_cb, &udata);
+    struct su_entry *entry;
+    int bkt;
+
+    rcu_read_lock();
+    hash_for_each_rcu(su_hash_table, bkt, entry, hnode) {
+        int rc = allow_uids_cb(entry, &udata);
+        if (rc) break;
+    }
+    rcu_read_unlock();
 
     return udata.idx;
 }
@@ -143,24 +234,24 @@ KP_EXPORT_SYMBOL(su_allow_uids);
 
 int su_allow_uid_profile(int is_user, uid_t uid, struct su_profile *out_profile)
 {
-    int rc = 0;
+    struct su_entry *entry;
+    int rc = -ENOENT;
 
     rcu_read_lock();
-    const struct kstorage *ks = get_kstorage(su_kstorage_gid, uid);
-    if (IS_ERR(ks)) {
-        rc = -ENOENT;
-        goto out;
-    }
-    struct su_profile *profile = (struct su_profile *)ks->data;
-
-    if (is_user) {
-        rc = compat_copy_to_user(out_profile, profile, sizeof(struct su_profile));
-        if (rc <= 0) {
-            logkfd("compat_copy_to_user error: %d", rc);
-            goto out;
+    entry = find_su_entry(uid);
+    if (entry) {
+        if (is_user) {
+            rc = compat_copy_to_user(out_profile, &entry->profile, sizeof(struct su_profile));
+            if (rc <= 0) {
+                logkfd("compat_copy_to_user error: %d", rc);
+                rc = -EFAULT;
+                goto out;
+            }
+            rc = 0;
+        } else {
+            memcpy(out_profile, &entry->profile, sizeof(struct su_profile));
+            rc = 0;
         }
-    } else {
-        memcpy(out_profile, profile, sizeof(struct su_profile));
     }
 
 out:
@@ -169,7 +260,6 @@ out:
 }
 KP_EXPORT_SYMBOL(su_allow_uid_profile);
 
-// no free, no lock
 int su_reset_path(const char *path)
 {
     if (!path) return -EINVAL;
@@ -217,9 +307,7 @@ static void handle_before_execve(char **__user u_filename_p, char **__user uargv
         } else {
             filp_close(filp, 0);
 
-            // command
-            uint64_t sp = 0;
-            sp = current_user_stack_pointer();
+            uint64_t sp = current_user_stack_pointer();
             sp -= sizeof(apd_path);
             sp &= 0xFFFFFFFFFFFFFFF8;
             int cplen = compat_copy_to_user((void *)sp, apd_path, sizeof(apd_path));
@@ -227,20 +315,16 @@ static void handle_before_execve(char **__user u_filename_p, char **__user uargv
                 *u_filename_p = (char *)sp;
             }
 
-            // argv
             int argv_cplen = 0;
             if (strcmp(legacy_su_path, filename)) {
-                if (argv_cplen <= 0) {
-                    sp = sp ?: current_user_stack_pointer();
-                    sp -= sizeof(legacy_su_path);
-                    sp &= 0xFFFFFFFFFFFFFFF8;
-                    argv_cplen = compat_copy_to_user((void *)sp, legacy_su_path, sizeof(legacy_su_path));
-                    if (argv_cplen > 0) {
-                        int rc = set_user_arg_ptr(0, *uargv, 0, sp);
-                        if (rc < 0) { // todo: modify entire argv
-                            logkfi("call apd argv error, uid: %d, to_uid: %d, sctx: %s, rc: %d\n", uid, to_uid, sctx,
-                                   rc);
-                        }
+                sp = sp ?: current_user_stack_pointer();
+                sp -= sizeof(legacy_su_path);
+                sp &= 0xFFFFFFFFFFFFFFF8;
+                argv_cplen = compat_copy_to_user((void *)sp, legacy_su_path, sizeof(legacy_su_path));
+                if (argv_cplen > 0) {
+                    int rc = set_user_arg_ptr(0, *uargv, 0, sp);
+                    if (rc < 0) {
+                        logkfi("call apd argv error, uid: %d, to_uid: %d, sctx: %s, rc: %d\n", uid, to_uid, sctx, rc);
                     }
                 }
             }
@@ -254,57 +338,61 @@ static void handle_before_execve(char **__user u_filename_p, char **__user uargv
     }
 }
 
-// https://elixir.bootlin.com/linux/v6.1/source/fs/exec.c#L2107
-// COMPAT_SYSCALL_DEFINE3(execve, const char __user *, filename,
-// 	const compat_uptr_t __user *, argv,
-// 	const compat_uptr_t __user *, envp)
+bool is_uid_excluded_fast(uid_t uid)
+{
+    // Fast path: direct cache access with likely hint
+    if (likely(exclude_direct_enabled && 
+               uid >= EXCLUDE_CACHE_START && 
+               uid < EXCLUDE_CACHE_END)) {
+        return exclude_direct_cache[uid - EXCLUDE_CACHE_START];
+    }
 
-// https://elixir.bootlin.com/linux/v6.1/source/fs/exec.c#L2087
-// SYSCALL_DEFINE3(execve, const char __user *, filename, const char __user *const __user *, argv,
-//                 const char __user *const __user *, envp)
+    // Fallback: Hash table with optimized lookup
+    struct exclude_entry *entry;
+    bool excluded = false;
+    
+    // Use RCU read lock for safe concurrent access
+    rcu_read_lock();
+    hash_for_each_possible_rcu(exclude_hash_table, entry, hnode, uid) {
+        if (entry->uid == uid) {
+            excluded = entry->exclude;
+            break;
+        }
+    }
+    rcu_read_unlock();
+    
+    return excluded;
+}
+KP_EXPORT_SYMBOL(is_uid_excluded_fast);
 
 static void before_execve(hook_fargs3_t *args, void *udata)
 {
+    uid_t uid = current_uid();
+    if (likely(is_uid_excluded_fast(uid))) {
+        return;
+    }
     void *arg0p = syscall_argn_p(args, 0);
     void *arg1p = syscall_argn_p(args, 1);
     handle_before_execve((char **)arg0p, (char **)arg1p, udata);
 }
 
-// https://elixir.bootlin.com/linux/v6.1/source/fs/exec.c#L2114
-// COMPAT_SYSCALL_DEFINE5(execveat, int, fd,
-// 		       const char __user *, filename,
-// 		       const compat_uptr_t __user *, argv,
-// 		       const compat_uptr_t __user *, envp,
-// 		       int,  flags)
-
-// https://elixir.bootlin.com/linux/v6.1/source/fs/exec.c#L2095
-// SYSCALL_DEFINE5(execveat, int, fd, const char __user *, filename, const char __user *const __user *, argv,
-//                 const char __user *const __user *, envp, int, flags)
 __maybe_unused static void before_execveat(hook_fargs5_t *args, void *udata)
 {
+    uid_t uid = current_uid();
+    if (likely(is_uid_excluded_fast(uid))) {
+        return;
+    }
     void *arg1p = syscall_argn_p(args, 1);
     void *arg2p = syscall_argn_p(args, 2);
     handle_before_execve((char **)arg1p, (char **)arg2p, udata);
 }
 
-// https://elixir.bootlin.com/linux/v6.1/source/fs/stat.c#L431
-// SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
-// 		struct stat __user *, statbuf, int, flag)
-
-// https://elixir.bootlin.com/linux/v6.1/source/fs/open.c#L492
-// SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
-
-// https://elixir.bootlin.com/linux/v6.1/source/fs/open.c#L497
-// SYSCALL_DEFINE4(faccessat2, int, dfd, const char __user *, filename, int, mode, int, flags)
-
-// https://elixir.bootlin.com/linux/v6.1/source/fs/stat.c#L661
-// SYSCALL_DEFINE5(statx,
-// 		int, dfd, const char __user *, filename, unsigned, flags,
-// 		unsigned int, mask,
-// 		struct statx __user *, buffer)
 static void su_handler_arg1_ufilename_before(hook_fargs6_t *args, void *udata)
 {
     uid_t uid = current_uid();
+    if (likely(is_uid_excluded_fast(uid))) {
+        return;
+    }
     if (!is_su_allow_uid(uid)) return;
 
     char __user **u_filename_p = (char __user **)syscall_argn_p(args, 1);
@@ -323,34 +411,77 @@ static void su_handler_arg1_ufilename_before(hook_fargs6_t *args, void *udata)
     }
 }
 
+int remove_ap_mod_exclude(uid_t uid)
+{
+    struct exclude_entry *entry;
+
+    spin_lock(&exclude_hash_lock);
+    entry = find_exclude_entry(uid);
+    if (entry) {
+        hash_del_rcu(&entry->hnode);
+        spin_unlock(&exclude_hash_lock);
+        call_rcu(&entry->rcu_head, exclude_entry_free);
+        return 0;
+    }
+    spin_unlock(&exclude_hash_lock);
+    return -ENOENT;
+}
+
 int set_ap_mod_exclude(uid_t uid, int exclude)
 {
-    int rc = 0;
-    if (exclude) {
-        rc = write_kstorage(exclude_kstorage_gid, uid, &exclude, 0, sizeof(exclude), false);
-    } else {
-        rc = remove_kstorage(exclude_kstorage_gid, uid);
+    exclude = !!exclude;
+    
+    // Fast path: direct cache
+    if (uid >= EXCLUDE_CACHE_START && uid < EXCLUDE_CACHE_END) {
+        exclude_direct_cache[uid - EXCLUDE_CACHE_START] = exclude;
+        exclude_direct_enabled = true;
+        
+        if (!exclude) {
+            remove_ap_mod_exclude(uid);
+        }
+        return 0;
     }
-    return rc;
+    
+    // Fallback: hash table with optimized lookup
+    if (exclude) {
+        struct exclude_entry *entry = vmalloc(sizeof(*entry));
+        if (!entry)
+            return -ENOMEM;
+
+        entry->uid = uid;
+        entry->exclude = exclude;
+
+        spin_lock(&exclude_hash_lock);
+        struct exclude_entry *old_entry;
+        // Optimized lookup and removal
+        hash_for_each_possible_rcu(exclude_hash_table, old_entry, hnode, uid) {
+            if (old_entry->uid == uid) {
+                hash_del_rcu(&old_entry->hnode);
+                call_rcu(&old_entry->rcu_head, exclude_entry_free);
+                break;
+            }
+        }
+        hash_add_rcu(exclude_hash_table, &entry->hnode, uid);
+        spin_unlock(&exclude_hash_lock);
+    } else {
+        remove_ap_mod_exclude(uid);
+    }
+
+    return 0;
 }
 KP_EXPORT_SYMBOL(set_ap_mod_exclude);
 
-int get_ap_mod_exclude(uid_t uid)
-{
-    int exclude = 0;
-    int rc = read_kstorage(exclude_kstorage_gid, uid, &exclude, 0, sizeof(exclude), false);
-    if (rc < 0) return 0;
-    return exclude;
-}
-KP_EXPORT_SYMBOL(get_ap_mod_exclude);
-
 int list_ap_mod_exclude(uid_t *uids, int len)
 {
-    long ids[len];
-    int cnt = list_kstorage_ids(exclude_kstorage_gid, ids, len, false);
-    for (int i = 0; i < len; i++) {
-        uids[i] = (uid_t)ids[i];
+    struct exclude_entry *entry;
+    int bkt;
+    int cnt = 0;
+    rcu_read_lock();
+    hash_for_each_rcu(exclude_hash_table, bkt, entry, hnode) {
+        if (cnt >= len) break;
+        uids[cnt++] = entry->uid;
     }
+    rcu_read_unlock();
     return cnt;
 }
 KP_EXPORT_SYMBOL(list_ap_mod_exclude);
@@ -359,14 +490,10 @@ int su_compat_init()
 {
     current_su_path = default_su_path;
 
-    su_kstorage_gid = try_alloc_kstroage_group();
-    if (su_kstorage_gid != KSTORAGE_SU_LIST_GROUP) return -ENOMEM;
-
-    exclude_kstorage_gid = try_alloc_kstroage_group();
-    if (exclude_kstorage_gid != KSTORAGE_EXCLUDE_LIST_GROUP) return -ENOMEM;
+    hash_init(su_hash_table);
+    hash_init(exclude_hash_table);
 
 #ifdef ANDROID
-    // default shell
     if (!all_allow_sctx[0]) {
         strcpy(all_allow_sctx, ALL_ALLOW_SCONTEXT_MAGISK);
     }

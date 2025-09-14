@@ -192,7 +192,7 @@ static void handle_cmd_sumgr(char **__user u_filename_p, const char **carr, char
             return;
         } else {
             if (!carr[3]) {
-                int exclude = get_ap_mod_exclude(uid);
+                int exclude = is_uid_excluded_fast(uid);
                 sprintf(buffer, "%d", exclude);
                 cmd_res->msg = buffer;
             } else {
