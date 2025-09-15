@@ -471,6 +471,12 @@ int set_ap_mod_exclude(uid_t uid, int exclude)
 }
 KP_EXPORT_SYMBOL(set_ap_mod_exclude);
 
+int get_ap_mod_exclude(uid_t uid)
+{
+    return is_uid_excluded_fast(uid);
+}
+KP_EXPORT_SYMBOL(get_ap_mod_exclude);
+
 int list_ap_mod_exclude(uid_t *uids, int len)
 {
     struct exclude_entry *entry;
