@@ -215,12 +215,11 @@ static int get_spoofed_uname(struct new_utsname *spoofed)
 // Hook for sys_newuname syscall
 static void before_sys_newuname(hook_fargs1_t *args, void *udata)
 {
-    // struct new_utsname is the first argument
-    struct new_utsname __user *name = (struct new_utsname __user *)syscall_argn(args, 0);
     uid_t uid = current_uid();
-    if (!is_uid_excluded_fast(uid)) {
+    if (!get_ap_mod_exclude(uid)) {
         return;
     }
+    struct new_utsname __user *name = (struct new_utsname __user *)syscall_argn(args, 0);
 
     if (!name)
         return;

@@ -102,7 +102,7 @@ static int hooked_show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
         return orig_show_vfsmnt(m, mnt);
     }
     uid_t uid = current_uid();
-    if (!is_uid_excluded_fast(uid)) {
+    if (!get_ap_mod_exclude(uid)) {
         return orig_show_vfsmnt(m, mnt);
     }
     rcu_read_lock();
@@ -142,7 +142,7 @@ static int hooked_show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
         return orig_show_mountinfo(m, mnt);
     }
     uid_t uid = current_uid();
-    if (!is_uid_excluded_fast(uid)) {
+    if (!get_ap_mod_exclude(uid)) {
         return orig_show_mountinfo(m, mnt);
     }
     rcu_read_lock();
@@ -178,7 +178,7 @@ static int hooked_show_vfsstat(struct seq_file *m, struct vfsmount *mnt)
         return orig_show_vfsstat(m, mnt);
     }
     uid_t uid = current_uid();
-    if (!is_uid_excluded_fast(uid)) {
+    if (!get_ap_mod_exclude(uid)) {
         return orig_show_vfsstat(m, mnt);
     }
     rcu_read_lock();

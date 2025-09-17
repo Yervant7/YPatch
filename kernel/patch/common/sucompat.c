@@ -52,13 +52,6 @@ static const char *current_su_path = 0;
 static DECLARE_HASHTABLE(su_hash_table, SU_HASH_BITS);
 static DEFINE_SPINLOCK(su_hash_lock);
 
-#define EXCLUDE_CACHE_START 10000
-#define EXCLUDE_CACHE_END   11000
-#define EXCLUDE_CACHE_SIZE  (EXCLUDE_CACHE_END - EXCLUDE_CACHE_START)
-
-static uint8_t exclude_direct_cache[EXCLUDE_CACHE_SIZE] = {0};
-static bool exclude_direct_enabled = false;
-
 #define EXCLUDE_HASH_BITS 6
 static DECLARE_HASHTABLE(exclude_hash_table, EXCLUDE_HASH_BITS);
 static DEFINE_SPINLOCK(exclude_hash_lock);
@@ -338,39 +331,10 @@ static void handle_before_execve(char **__user u_filename_p, char **__user uargv
     }
 }
 
-bool is_uid_excluded_fast(uid_t uid)
-{
-    // Fast path: direct cache access with likely hint
-    if (likely(exclude_direct_enabled && 
-               uid >= EXCLUDE_CACHE_START && 
-               uid < EXCLUDE_CACHE_END)) {
-        return exclude_direct_cache[uid - EXCLUDE_CACHE_START];
-    }
-
-    // Fallback: Hash table with optimized lookup
-    struct exclude_entry *entry;
-    bool excluded = false;
-    
-    // Use RCU read lock for safe concurrent access
-    rcu_read_lock();
-    hash_for_each_possible_rcu(exclude_hash_table, entry, hnode, uid) {
-        if (entry->uid == uid) {
-            excluded = entry->exclude;
-            break;
-        }
-    }
-    rcu_read_unlock();
-    
-    return excluded;
-}
-KP_EXPORT_SYMBOL(is_uid_excluded_fast);
-
 static void before_execve(hook_fargs3_t *args, void *udata)
 {
     uid_t uid = current_uid();
-    if (likely(is_uid_excluded_fast(uid))) {
-        return;
-    }
+    if (likely(!is_su_allow_uid(uid))) return;
     void *arg0p = syscall_argn_p(args, 0);
     void *arg1p = syscall_argn_p(args, 1);
     handle_before_execve((char **)arg0p, (char **)arg1p, udata);
@@ -379,9 +343,7 @@ static void before_execve(hook_fargs3_t *args, void *udata)
 __maybe_unused static void before_execveat(hook_fargs5_t *args, void *udata)
 {
     uid_t uid = current_uid();
-    if (likely(is_uid_excluded_fast(uid))) {
-        return;
-    }
+    if (likely(!is_su_allow_uid(uid))) return;
     void *arg1p = syscall_argn_p(args, 1);
     void *arg2p = syscall_argn_p(args, 2);
     handle_before_execve((char **)arg1p, (char **)arg2p, udata);
@@ -390,10 +352,7 @@ __maybe_unused static void before_execveat(hook_fargs5_t *args, void *udata)
 static void su_handler_arg1_ufilename_before(hook_fargs6_t *args, void *udata)
 {
     uid_t uid = current_uid();
-    if (likely(is_uid_excluded_fast(uid))) {
-        return;
-    }
-    if (!is_su_allow_uid(uid)) return;
+    if (likely(!is_su_allow_uid(uid))) return;
 
     char __user **u_filename_p = (char __user **)syscall_argn_p(args, 1);
 
@@ -430,19 +389,7 @@ int remove_ap_mod_exclude(uid_t uid)
 int set_ap_mod_exclude(uid_t uid, int exclude)
 {
     exclude = !!exclude;
-    
-    // Fast path: direct cache
-    if (uid >= EXCLUDE_CACHE_START && uid < EXCLUDE_CACHE_END) {
-        exclude_direct_cache[uid - EXCLUDE_CACHE_START] = exclude;
-        exclude_direct_enabled = true;
-        
-        if (!exclude) {
-            remove_ap_mod_exclude(uid);
-        }
-        return 0;
-    }
-    
-    // Fallback: hash table with optimized lookup
+
     if (exclude) {
         struct exclude_entry *entry = vmalloc(sizeof(*entry));
         if (!entry)
@@ -473,7 +420,20 @@ KP_EXPORT_SYMBOL(set_ap_mod_exclude);
 
 int get_ap_mod_exclude(uid_t uid)
 {
-    return is_uid_excluded_fast(uid);
+    struct exclude_entry *entry;
+    int excluded = 0;
+
+    // Use RCU read lock for safe concurrent access
+    rcu_read_lock();
+    hash_for_each_possible_rcu(exclude_hash_table, entry, hnode, uid) {
+        if (entry->uid == uid) {
+            excluded = entry->exclude;
+            break;
+        }
+    }
+    rcu_read_unlock();
+
+    return excluded;
 }
 KP_EXPORT_SYMBOL(get_ap_mod_exclude);
 

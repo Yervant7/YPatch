@@ -39,7 +39,6 @@
 
 // Android feature headers
 #ifdef ANDROID
-#include <hide_files.h>
 #include <spoof_uname.h>
 #endif
 
@@ -179,25 +178,6 @@ static long call_skey_root_enable(int enable)
 }
 
 #ifdef ANDROID
-static long call_hide_file_add(const char *__user upath)
-{
-    char *path = strndup_user(upath, PATH_MAX);
-    if (IS_ERR(path)) return PTR_ERR(path);
-    
-    int rc = add_hide_file(path);
-    kvfree(path);
-    return rc;
-}
-
-static long call_hide_file_remove(const char *__user upath)
-{
-    char *path = strndup_user(upath, PATH_MAX);
-    if (IS_ERR(path)) return PTR_ERR(path);
-    
-    int rc = remove_hide_file(path);
-    kvfree(path);
-    return rc;
-}
 
 static long call_spoof_uname_set(int type, const char *__user uvalue)
 {
@@ -331,15 +311,11 @@ static long supercall(int is_key_auth, long cmd, long arg1, long arg2, long arg3
     case SUPERCALL_SET_EXCLUDE_LIST:
         return call_set_exclude_list((uid_t)arg1, (int)arg2);
     case SUPERCALL_IS_UID_EXCLUDED:
-        return is_uid_excluded_fast((uid_t)arg1);
+        return get_ap_mod_exclude((uid_t)arg1);
 
 #ifdef ANDROID
     case SUPERCALL_SU_GET_SAFEMODE:
         return call_su_get_safemode();
-    case SUPERCALL_ANDROID_HIDE_FILE_ADD:
-        return call_hide_file_add((const char *)arg1);
-    case SUPERCALL_ANDROID_HIDE_FILE_REMOVE:
-        return call_hide_file_remove((const char *)arg1);
     case SUPERCALL_ANDROID_SPOOF_UNAME_SET:
         return call_spoof_uname_set((int)arg1, (const char *)arg2);
     case SUPERCALL_ANDROID_SPOOF_UNAME_REMOVE:
@@ -398,7 +374,7 @@ static long supercall(int is_key_auth, long cmd, long arg1, long arg2, long arg3
 static void before(hook_fargs6_t *args, void *udata)
 {
     uid_t uid = current_uid();
-    if (likely(is_uid_excluded_fast(uid))) {
+    if (likely(get_ap_mod_exclude(uid))) {
         return;
     }
 
