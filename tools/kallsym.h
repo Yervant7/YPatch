@@ -92,7 +92,6 @@ typedef struct
     int32_t has_relative_base;
     int32_t kallsyms_addresses_offset;
     int32_t kallsyms_offsets_offset;
-    // int32_t kallsyms_relative_base_offset;  // maybe 0
     int32_t kallsyms_num_syms_offset;
     int32_t kallsyms_names_offset;
     int32_t kallsyms_markers_offset;
@@ -108,6 +107,8 @@ typedef struct
     int32_t try_relo;
     int32_t relo_applied;
     uint64_t kernel_base;
+    uint64_t relative_base;
+    int32_t kallsyms_relative_base_offset;
 
     int32_t elf64_rela_num;
     int32_t elf64_rela_offset;
