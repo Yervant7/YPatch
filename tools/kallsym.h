@@ -109,6 +109,7 @@ typedef struct
     uint64_t kernel_base;
     uint64_t relative_base;
     int32_t kallsyms_relative_base_offset;
+    int32_t has_absolute_percpu;
 
     int32_t elf64_rela_num;
     int32_t elf64_rela_offset;
