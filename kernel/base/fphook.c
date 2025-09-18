@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* 
  * Copyright (C) 2023 bmax121. All Rights Reserved.
+ * Copyright (C) 2025 Yervant7. All Rights Reserved.
  */
 
 #include <hook.h>
@@ -12,32 +13,59 @@
 // transit0
 typedef uint64_t (*transit0_func_t)();
 
-uint64_t __attribute__((section(".fp.transit0.text"))) __attribute__((__noinline__)) _fp_transit0()
+uint64_t __attribute__((section(".fp.transit0.text"))) __attribute__((__noinline__)) __attribute__((optimize("O3"))) _fp_transit0()
 {
     uint64_t this_va;
     asm volatile("adr %0, ." : "=r"(this_va));
     uint32_t *vptr = (uint32_t *)this_va;
-    while (*--vptr != ARM64_NOP) {
-    };
+    
+    // Optimized NOP scan - reduce branch misprediction
+    while (likely(*--vptr != ARM64_NOP)) {
+        // Prefetch next cache line for better performance
+        __builtin_prefetch(vptr - 16, 0, 3);
+    }
     vptr--;
+    
     fp_hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, fp_hook_chain_t, transit);
+    
+    // Aggressive prefetching for better cache performance
+    __builtin_prefetch(hook_chain, 0, 3);
+    __builtin_prefetch(hook_chain->states, 0, 3);
+    __builtin_prefetch(hook_chain->befores, 0, 3);
+    __builtin_prefetch(hook_chain->afters, 0, 3);
+    __builtin_prefetch(hook_chain->udata, 0, 3);
+    
     hook_fargs0_t fargs;
     fargs.skip_origin = 0;
     fargs.chain = hook_chain;
-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
-        hook_chain0_callback func = hook_chain->befores[i];
-        if (func) func(&fargs, hook_chain->udata[i]);
+    
+    // Optimized loop - reduce branches and improve prediction
+    const int32_t max_items = hook_chain->chain_items_max;
+    chain_item_state *states = hook_chain->states;
+    void **befores = hook_chain->befores;
+    void **udata = hook_chain->udata;
+    
+    for (int32_t i = 0; likely(i < max_items); i++) {
+        if (likely(states[i] == CHAIN_ITEM_STATE_READY)) {
+            hook_chain0_callback func = (hook_chain0_callback)befores[i];
+            if (likely(func)) func(&fargs, udata[i]);
+        }
     }
-    if (!fargs.skip_origin) {
+    
+    if (likely(!fargs.skip_origin)) {
         transit0_func_t origin_func = (transit0_func_t)hook_chain->hook.origin_fp;
         fargs.ret = origin_func();
     }
-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
-        hook_chain0_callback func = hook_chain->afters[i];
-        if (func) func(&fargs, hook_chain->udata[i]);
+    
+    // Optimized reverse loop
+    void **afters = hook_chain->afters;
+    for (int32_t i = max_items - 1; likely(i >= 0); i--) {
+        if (likely(states[i] == CHAIN_ITEM_STATE_READY)) {
+            hook_chain0_callback func = (hook_chain0_callback)afters[i];
+            if (func) func(&fargs, udata[i]);
+        }
     }
+    
     return fargs.ret;
 }
 extern void _fp_transit0_end();
@@ -45,16 +73,29 @@ extern void _fp_transit0_end();
 // transit4
 typedef uint64_t (*transit4_func_t)(uint64_t, uint64_t, uint64_t, uint64_t);
 
-uint64_t __attribute__((section(".fp.transit4.text"))) __attribute__((__noinline__))
+uint64_t __attribute__((section(".fp.transit4.text"))) __attribute__((__noinline__)) __attribute__((optimize("O3")))
 _fp_transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     uint64_t this_va;
     asm volatile("adr %0, ." : "=r"(this_va));
     uint32_t *vptr = (uint32_t *)this_va;
-    while (*--vptr != ARM64_NOP) {
-    };
+    
+    // Optimized NOP scan - reduce branch misprediction
+    while (likely(*--vptr != ARM64_NOP)) {
+        // Prefetch next cache line for better performance
+        __builtin_prefetch(vptr - 16, 0, 3);
+    }
     vptr--;
+    
     fp_hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, fp_hook_chain_t, transit);
+    
+    // Aggressive prefetching for better cache performance
+    __builtin_prefetch(hook_chain, 0, 3);
+    __builtin_prefetch(hook_chain->states, 0, 3);
+    __builtin_prefetch(hook_chain->befores, 0, 3);
+    __builtin_prefetch(hook_chain->afters, 0, 3);
+    __builtin_prefetch(hook_chain->udata, 0, 3);
+    
     hook_fargs4_t fargs;
     fargs.skip_origin = 0;
     fargs.arg0 = arg0;
@@ -62,20 +103,34 @@ _fp_transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
     fargs.arg2 = arg2;
     fargs.arg3 = arg3;
     fargs.chain = hook_chain;
-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
-        hook_chain4_callback func = hook_chain->befores[i];
-        if (func) func(&fargs, hook_chain->udata[i]);
+    
+    // Optimized loop - reduce branches and improve prediction
+    int32_t max_items = hook_chain->chain_items_max;
+    chain_item_state *states = hook_chain->states;
+    void **befores = hook_chain->befores;
+    void **udata = hook_chain->udata;
+    
+    for (int32_t i = 0; likely(i < max_items); i++) {
+        if (likely(states[i] == CHAIN_ITEM_STATE_READY)) {
+            hook_chain4_callback func = (hook_chain4_callback)befores[i];
+            if (likely(func)) func(&fargs, udata[i]);
+        }
     }
-    if (!fargs.skip_origin) {
+    
+    if (likely(!fargs.skip_origin)) {
         transit4_func_t origin_func = (transit4_func_t)hook_chain->hook.origin_fp;
         fargs.ret = origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3);
     }
-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
-        hook_chain4_callback func = hook_chain->afters[i];
-        if (func) func(&fargs, hook_chain->udata[i]);
+    
+    // Optimized reverse loop
+    void **afters = hook_chain->afters;
+    for (int32_t i = max_items - 1; likely(i >= 0); i--) {
+        if (likely(states[i] == CHAIN_ITEM_STATE_READY)) {
+            hook_chain4_callback func = (hook_chain4_callback)afters[i];
+            if (func) func(&fargs, udata[i]);
+        }
     }
+    
     return fargs.ret;
 }
 
@@ -84,17 +139,30 @@ extern void _fp_transit4_end();
 // transit8:
 typedef uint64_t (*transit8_func_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
-uint64_t __attribute__((section(".fp.transit8.text"))) __attribute__((__noinline__))
+uint64_t __attribute__((section(".fp.transit8.text"))) __attribute__((__noinline__)) __attribute__((optimize("O3")))
 _fp_transit8(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
              uint64_t arg7)
 {
     uint64_t this_va;
     asm volatile("adr %0, ." : "=r"(this_va));
     uint32_t *vptr = (uint32_t *)this_va;
-    while (*--vptr != ARM64_NOP) {
-    };
+    
+    // Optimized NOP scan - reduce branch misprediction
+    while (likely(*--vptr != ARM64_NOP)) {
+        // Prefetch next cache line for better performance
+        __builtin_prefetch(vptr - 16, 0, 3);
+    }
     vptr--;
+    
     fp_hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, fp_hook_chain_t, transit);
+    
+    // Aggressive prefetching for better cache performance
+    __builtin_prefetch(hook_chain, 0, 3);
+    __builtin_prefetch(hook_chain->states, 0, 3);
+    __builtin_prefetch(hook_chain->befores, 0, 3);
+    __builtin_prefetch(hook_chain->afters, 0, 3);
+    __builtin_prefetch(hook_chain->udata, 0, 3);
+    
     hook_fargs8_t fargs;
     fargs.skip_origin = 0;
     fargs.arg0 = arg0;
@@ -106,21 +174,35 @@ _fp_transit8(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_
     fargs.arg6 = arg6;
     fargs.arg7 = arg7;
     fargs.chain = hook_chain;
-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
-        hook_chain8_callback func = hook_chain->befores[i];
-        if (func) func(&fargs, hook_chain->udata[i]);
+    
+    // Optimized loop - reduce branches and improve prediction
+    int32_t max_items = hook_chain->chain_items_max;
+    chain_item_state *states = hook_chain->states;
+    void **befores = hook_chain->befores;
+    void **udata = hook_chain->udata;
+    
+    for (int32_t i = 0; likely(i < max_items); i++) {
+        if (likely(states[i] == CHAIN_ITEM_STATE_READY)) {
+            hook_chain8_callback func = (hook_chain8_callback)befores[i];
+            if (likely(func)) func(&fargs, udata[i]);
+        }
     }
-    if (!fargs.skip_origin) {
+    
+    if (likely(!fargs.skip_origin)) {
         transit8_func_t origin_func = (transit8_func_t)hook_chain->hook.origin_fp;
         fargs.ret =
             origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3, fargs.arg4, fargs.arg5, fargs.arg6, fargs.arg7);
     }
-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
-        hook_chain8_callback func = hook_chain->afters[i];
-        if (func) func(&fargs, hook_chain->udata[i]);
+    
+    // Optimized reverse loop
+    void **afters = hook_chain->afters;
+    for (int32_t i = max_items - 1; likely(i >= 0); i--) {
+        if (likely(states[i] == CHAIN_ITEM_STATE_READY)) {
+            hook_chain8_callback func = (hook_chain8_callback)afters[i];
+            if (func) func(&fargs, udata[i]);
+        }
     }
+    
     return fargs.ret;
 }
 
@@ -130,17 +212,30 @@ extern void _fp_transit8_end();
 typedef uint64_t (*transit12_func_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                                      uint64_t, uint64_t, uint64_t, uint64_t);
 
-uint64_t __attribute__((section(".fp.transit12.text"))) __attribute__((__noinline__))
+uint64_t __attribute__((section(".fp.transit12.text"))) __attribute__((__noinline__)) __attribute__((optimize("O3")))
 _fp_transit12(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
               uint64_t arg7, uint64_t arg8, uint64_t arg9, uint64_t arg10, uint64_t arg11)
 {
     uint64_t this_va;
     asm volatile("adr %0, ." : "=r"(this_va));
     uint32_t *vptr = (uint32_t *)this_va;
-    while (*--vptr != ARM64_NOP) {
-    };
+    
+    // Optimized NOP scan - reduce branch misprediction
+    while (likely(*--vptr != ARM64_NOP)) {
+        // Prefetch next cache line for better performance
+        __builtin_prefetch(vptr - 16, 0, 3);
+    }
     vptr--;
+    
     fp_hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, fp_hook_chain_t, transit);
+    
+    // Aggressive prefetching for better cache performance
+    __builtin_prefetch(hook_chain, 0, 3);
+    __builtin_prefetch(hook_chain->states, 0, 3);
+    __builtin_prefetch(hook_chain->befores, 0, 3);
+    __builtin_prefetch(hook_chain->afters, 0, 3);
+    __builtin_prefetch(hook_chain->udata, 0, 3);
+    
     hook_fargs12_t fargs;
     fargs.skip_origin = 0;
     fargs.arg0 = arg0;
@@ -156,27 +251,41 @@ _fp_transit12(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
     fargs.arg10 = arg10;
     fargs.arg11 = arg11;
     fargs.chain = hook_chain;
-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
-        hook_chain12_callback func = hook_chain->befores[i];
-        if (func) func(&fargs, hook_chain->udata[i]);
+    
+    // Optimized loop - reduce branches and improve prediction
+    int32_t max_items = hook_chain->chain_items_max;
+    chain_item_state *states = hook_chain->states;
+    void **befores = hook_chain->befores;
+    void **udata = hook_chain->udata;
+    
+    for (int32_t i = 0; likely(i < max_items); i++) {
+        if (likely(states[i] == CHAIN_ITEM_STATE_READY)) {
+            hook_chain12_callback func = (hook_chain12_callback)befores[i];
+            if (likely(func)) func(&fargs, udata[i]);
+        }
     }
-    if (!fargs.skip_origin) {
+    
+    if (likely(!fargs.skip_origin)) {
         transit12_func_t origin_func = (transit12_func_t)hook_chain->hook.origin_fp;
         fargs.ret = origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3, fargs.arg4, fargs.arg5, fargs.arg6,
                                 fargs.arg7, fargs.arg8, fargs.arg9, fargs.arg10, fargs.arg11);
     }
-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
-        hook_chain12_callback func = hook_chain->afters[i];
-        if (func) func(&fargs, hook_chain->udata[i]);
+    
+    // Optimized reverse loop
+    void **afters = hook_chain->afters;
+    for (int32_t i = max_items - 1; likely(i >= 0); i--) {
+        if (likely(states[i] == CHAIN_ITEM_STATE_READY)) {
+            hook_chain12_callback func = (hook_chain12_callback)afters[i];
+            if (func) func(&fargs, udata[i]);
+        }
     }
+    
     return fargs.ret;
 }
 
 extern void _fp_transit12_end();
 
-static hook_err_t hook_chain_prepare(uint32_t *transit, int32_t argno)
+static inline hook_err_t __attribute__((optimize("O3"))) hook_chain_prepare(uint32_t *transit, int32_t argno)
 {
     uint64_t transit_start, transit_end;
     switch (argno) {

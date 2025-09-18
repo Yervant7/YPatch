@@ -28,14 +28,14 @@ SECTIONS
         _setup_end = .;
     }
 
-    . = ALIGN(16);
+    . = ALIGN(64);
     .setup.map : {
         _map_start = .;
         base/map.o(.map.data)
         base/map.o(.map.text)
         base/map.o(.text)
         base/map1.o(.text)
-        . = ALIGN(16);
+        . = ALIGN(64);
         _map_end = .;
     }
     ASSERT(SIZEOF(.setup.map) < 0xa00, "Size too large of .setup.map!")
@@ -73,7 +73,7 @@ SECTIONS
         *(.rodata*)
         /*  *(.got) */
 
-        . = ALIGN(16);
+        . = ALIGN(64);
         _kp_text_end = .;
     }
 
