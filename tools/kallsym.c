@@ -263,6 +263,9 @@ static inline int get_addresses_elem_size(kallsym_t *info)
 
 static inline int get_offsets_elem_size(kallsym_t *info)
 {
+    /* since 4.6 offsets are 32-bit even on 64-bit machines */
+    if (info->has_relative_base)
+        return 4;
     return info->asm_long_size;
 }
 
@@ -387,6 +390,16 @@ static int32_t find_kallsyms_addresses_or_offsets(kallsym_t *info, char *img, in
             return -1;
         info->kallsyms_relative_base_offset = pos;
         info->relative_base = uint_unpack(img + pos, relative_base_size, info->is_be);
+
+        /* workaround: ignore corrupted relative_base, use known kernel_base */
+        /* reject the dummy 0xffffffffffffffff picked up on some Android-15 kernels */
+        if ((info->relative_base & 0xffff000000000000ULL) == 0xffff000000000000ULL) {
+            tools_logw("relative_base looks like a dummy value (0x%llx), ignoring\n", info->relative_base);
+            info->relative_base = 0;          /* force fallback below */
+        }
+        if ((info->relative_base & 0xffff000000000000ULL) != 0xffff000000000000ULL || info->relative_base == 0xffffffffffffffffULL) {
+            info->relative_base = info->kernel_base;
+        }
 
         /* FIX: Set kernel_base to relative_base if not already set */
         if (info->kernel_base == 0 || info->kernel_base == 0xffffffffffffffff) {
@@ -546,6 +559,11 @@ static int find_approx_offsets(kallsym_t *info, char *img, int32_t imglen)
     tools_logi("approximate kallsyms_offsets range: [0x%08x, 0x%08x) "
                "count: 0x%08x\n",
                approx_offset, end, approx_num_syms);
+    /* --- last-resort base estimation --- */
+    if (info->banner_num > 0) {
+        uint32_t banner_off = info->linux_banner_offset[info->banner_num - 1];
+        info->kernel_base = banner_off - approx_offset;   /* banner VA == banner file offset + base */
+    }
     return 0;
 }
 
@@ -1177,6 +1195,14 @@ static int correct_addresses_or_offsets_by_banner(kallsym_t *info, char *img, in
                     info->kallsyms_addresses_offset = pos;
                 }
                 info->symbol_banner_idx = i;
+
+                /* --- re-estimate kernel base  --- */
+                info->kernel_base = banner_addr - target_file_offset;
+
+                /* sanity check: banner must map back to the same file offset */
+                uint64_t check = info->kernel_base + target_file_offset;
+                if (check != banner_addr) continue;          /* wrong table – try next candidate */
+
                 tools_logi("linux_banner index: %d, found correct table offset at 0x%08x\n", i, pos);
                 return 0; /* Success */
             }
@@ -1193,6 +1219,11 @@ static int correct_addresses_or_offsets(kallsym_t *info, char *img, int32_t imgl
 
     int rc;
 
+    /* Android-15 kernels sometimes store a dummy value – skip broken paths */
+    if (info->has_relative_base &&
+        info->relative_base == 0xffffffffffffffffULL)
+        goto fallback;
+
     rc = correct_addresses_or_offsets_by_banner(info, img, imglen);
     if (rc == 0) return 0;
 
@@ -1201,6 +1232,7 @@ static int correct_addresses_or_offsets(kallsym_t *info, char *img, int32_t imgl
     rc = correct_addresses_or_offsets_by_vectors(info, img, imglen);
     if (rc == 0) return 0;
 
+fallback:
     tools_logw("vectors method failed, fallback to heuristic approx method\n");
 
     rc = find_approx_addresses_or_offset(info, img, imglen);
@@ -1208,6 +1240,10 @@ static int correct_addresses_or_offsets(kallsym_t *info, char *img, int32_t imgl
         tools_logi("approximate kallsyms_offsets range: [0x%08x, 0x%08x) count: 0x%08x\n",
                    info->_approx_addresses_or_offsets_offset, info->_approx_addresses_or_offsets_end,
                    info->_approx_addresses_or_offsets_num);
+        if (info->kernel_base == 0 || info->kernel_base == 0xffffffffffffffff) {
+            info->kernel_base = 0xffffc00080000000ULL; // Safe fallback for Android15 ARM64
+            tools_logw("fallback: using default Android15 ARM64 kernel_base: 0x%llx\n", info->kernel_base);
+        }
     }
     return rc;
 }
@@ -1315,6 +1351,13 @@ int analyze_kallsym_info(kallsym_t *info, char *img, int32_t imglen, enum arch_t
 out:
     if (!rc) {
         memcpy(img, copied_img, imglen);
+
+        /* if we succeeded with the approximate table, ignore the (possibly
+           wrong) exact tables from now on */
+        if (info->_approx_addresses_or_offsets_offset >= 0) {
+            info->kallsyms_addresses_offset = -1;
+            info->kallsyms_offsets_offset   = -1;
+        }
         
         /* Final validation and fix of kernel_base */
         if (info->has_relative_base && (info->kernel_base == 0 || info->kernel_base == 0xffffffffffffffff)) {
@@ -1333,6 +1376,14 @@ int32_t get_symbol_index_offset(kallsym_t *info, char *img, int32_t index)
     if (!info || !img) {
         tools_loge("get_symbol_index_offset: null parameters\n");
         return -1;
+    }
+
+    if (info->_approx_addresses_or_offsets_offset >= 0) {
+        int32_t elem = get_offsets_elem_size(info);
+        int64_t off = info->_approx_addresses_or_offsets_offset + (int64_t)index * elem;
+        if (off < 0 || off + elem > info->_approx_addresses_or_offsets_end)
+            return -1;
+        return (int32_t)int_unpack(img + off, elem, info->is_be);
     }
     
     if (index < 0 || index >= info->kallsyms_num_syms) {
