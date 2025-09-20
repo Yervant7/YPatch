@@ -263,9 +263,6 @@ static inline int get_addresses_elem_size(kallsym_t *info)
 
 static inline int get_offsets_elem_size(kallsym_t *info)
 {
-    /* since 4.6 offsets are 32-bit even on 64-bit machines */
-    if (info->has_relative_base)
-        return 4;
     return info->asm_long_size;
 }
 
@@ -419,6 +416,17 @@ static int32_t find_kallsyms_addresses_or_offsets(kallsym_t *info, char *img, in
         tools_logi("kallsyms_offsets offset: 0x%08x\n", info->kallsyms_offsets_offset);
         tools_logi("kallsyms_relative_base offset: 0x%08x, value: 0x%llx\n", info->kallsyms_relative_base_offset,
                    info->relative_base);
+
+        if (info->_approx_addresses_or_offsets_offset != 0) {
+            int32_t calculated_offset = info->kallsyms_offsets_offset;
+            int32_t heuristic_offset = info->_approx_addresses_or_offsets_offset;
+
+            if (calculated_offset != heuristic_offset) {
+                tools_logw("using heuristic offset 0x%08x instead of calculated 0x%08x\n", 
+                    heuristic_offset, calculated_offset);
+                info->kallsyms_offsets_offset = heuristic_offset;
+            }
+        }
     } else {
         int32_t addrs_table_size = info->kallsyms_num_syms * get_addresses_elem_size(info);
         pos -= addrs_table_size;
@@ -628,6 +636,8 @@ static int32_t find_approx_addresses_or_offset(kallsym_t *info, char *img, int32
 
 static int32_t find_addresses_or_offsets(kallsym_t *info, char *img, int32_t imglen)
 {
+    find_approx_addresses_or_offset(info, img, imglen);
+
     int rc = find_kallsyms_addresses_or_offsets(info, img, imglen);
     if (rc == 0) {
         return 0;
@@ -639,49 +649,88 @@ static int32_t find_addresses_or_offsets(kallsym_t *info, char *img, int32_t img
 
 static int find_num_syms(kallsym_t *info, char *img, int32_t imglen)
 {
+#define NSYMS_MAX_GAP 10
+    int32_t approx_end = info->kallsyms_names_offset;
+    int32_t num_syms_elem_size = 4;
+    int32_t counted_syms = 0;
+    int32_t approx_num_syms = 0;
+
     int32_t pos = info->kallsyms_names_offset;
-    int32_t num_syms = 0;
     while (pos < info->kallsyms_markers_offset) {
         int32_t next_pos = pos;
         uint8_t len = *(uint8_t *)(img + next_pos);
         if (len == 0)
             break;
-
         decompress_symbol_name(info, img, &next_pos, NULL, NULL);
         if (next_pos <= pos)
             break; // error or end
         pos = next_pos;
-        num_syms++;
+        counted_syms++;
     }
 
-    if (num_syms == 0) {
-        tools_loge("counted 0 symbols from names table\n");
-        return -1;
+    if (info->_approx_addresses_or_offsets_num > 0) {
+        approx_num_syms = info->_approx_addresses_or_offsets_num;
+        tools_logi("using approximate num_syms: 0x%08x, counted: 0x%08x\n", 
+                   approx_num_syms, counted_syms);
+    } else {
+        if (counted_syms == 0) {
+            tools_loge("counted 0 symbols from names table and no approximation available\n");
+            return -1;
+        }
+        approx_num_syms = counted_syms;
+        tools_logi("using counted num_syms: 0x%08x (no approximation available)\n", counted_syms);
     }
 
-    // Now search for num_syms before kallsyms_names_offset
-    int32_t num_syms_elem_size = 4;
     int32_t search_end = info->kallsyms_names_offset;
     int32_t search_start = search_end - 4096;
     if (search_start < 0)
         search_start = 0;
 
-    for (int32_t cand = search_end; cand >= search_start; cand--) {
+    for (int32_t cand = search_end; cand >= search_start; cand -= num_syms_elem_size) {
         if ((cand % num_syms_elem_size) != 0)
             continue;
         if (cand + num_syms_elem_size > imglen)
             continue;
+            
         int nsyms = (int)uint_unpack(img + cand, num_syms_elem_size, info->is_be);
-        if (nsyms == num_syms) {
+        if (nsyms == counted_syms) {
             info->kallsyms_num_syms = nsyms;
             info->kallsyms_num_syms_offset = cand;
-            tools_logi("kallsyms_num_syms offset: 0x%08x, value: 0x%08x\n", info->kallsyms_num_syms_offset,
-                       info->kallsyms_num_syms);
+            tools_logi("kallsyms_num_syms offset: 0x%08x, value: 0x%08x (exact match)\n", 
+                       info->kallsyms_num_syms_offset, info->kallsyms_num_syms);
             return 0;
         }
     }
 
-    tools_logw("Could not find kallsyms_num_syms\n");
+    for (int32_t cand = search_end; cand >= search_start; cand -= num_syms_elem_size) {
+        if ((cand % num_syms_elem_size) != 0)
+            continue;
+        if (cand + num_syms_elem_size > imglen)
+            continue;
+
+        int nsyms = (int)uint_unpack(img + cand, num_syms_elem_size, info->is_be);
+        if (!nsyms) continue;
+
+        if (approx_num_syms > nsyms && approx_num_syms - nsyms > NSYMS_MAX_GAP) continue;
+        if (nsyms > approx_num_syms && nsyms - approx_num_syms > NSYMS_MAX_GAP) continue;
+
+        info->kallsyms_num_syms = nsyms;
+        info->kallsyms_num_syms_offset = cand;
+        tools_logi("kallsyms_num_syms offset: 0x%08x, value: 0x%08x (approximate match, diff: %d)\n", 
+                   info->kallsyms_num_syms_offset, info->kallsyms_num_syms, 
+                   abs(nsyms - approx_num_syms));
+        return 0;
+    }
+
+    if (approx_num_syms > 0) {
+        info->kallsyms_num_syms = approx_num_syms - NSYMS_MAX_GAP;
+        info->kallsyms_num_syms_offset = 0;
+        tools_logw("can't find kallsyms_num_syms offset, using approximation: 0x%08x\n", 
+                   info->kallsyms_num_syms);
+        return 0;
+    }
+    
+    tools_loge("Could not determine kallsyms_num_syms\n");
     return -1;
 }
 
@@ -1275,7 +1324,7 @@ static int retry_relo(kallsym_t *info, char *img, int32_t imglen)
 {
     int rc = -1;
     static int32_t (*funcs[])(kallsym_t *, char *, int32_t) = { try_find_arm64_relo_table, find_markers, find_names,
-                                                                  find_num_syms, find_kallsyms_addresses_or_offsets,
+                                                                  find_num_syms, find_addresses_or_offsets,
                                                                   correct_addresses_or_offsets };
 
     for (int i = 0; i < (int)(sizeof(funcs) / sizeof(funcs[0])); i++) {
