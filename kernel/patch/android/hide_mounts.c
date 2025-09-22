@@ -31,6 +31,8 @@ struct fs_struct;
 
  #define HASH_LEN_DECLARE u32 hash; u32 len
 
+ #define MAX_INSN_SIZE 10
+
 struct qstr {
 	union {
 		struct {
@@ -40,6 +42,12 @@ struct qstr {
 	};
 	const unsigned char *name;
 };
+
+typedef int (*copy_from_kernel_nofault_t)(void *dst, const void *src, size_t len);
+typedef int (*probe_kernel_read_t)(void *dst, const void *src, size_t len);
+
+static copy_from_kernel_nofault_t copy_from_kernel_nofault_fn = NULL;
+static probe_kernel_read_t probe_kernel_read_fn = NULL;
 
 static int g_fs_root_offset = -1;
 static int g_path_mnt_offset = -1;
@@ -60,6 +68,15 @@ static const char *hidden_mount_prefixes[] = {
     "/odm",
     NULL
 };
+
+static inline int safe_read_kernel(void *dst, const void *src, size_t len)
+{
+    if (copy_from_kernel_nofault_fn) {
+        return copy_from_kernel_nofault_fn(dst, src, len);
+    } else {
+        return probe_kernel_read_fn(dst, src, len);
+    }
+}
 
 static int should_hide_mount(const char *mountpoint, const char *rootname)
 {
@@ -334,6 +351,87 @@ static int discover_fs_struct_offsets(struct fs_struct *fs)
     return -1;
 }
 
+static int find_fs_offset_from_exit_fs(void)
+{
+    unsigned long exit_fs_addr;
+    int offset = -1;
+    int i;
+
+    exit_fs_addr = kallsyms_lookup_name("exit_fs");
+    if (!exit_fs_addr) {
+        log_boot("[-] exit_fs symbol not found\n");
+        return -1;
+    }
+
+    log_boot("[*] Analyzing exit_fs at 0x%lx\n", exit_fs_addr);
+
+    for (i = 0; i < MAX_INSN_SIZE; i++) {
+        u32 insn;
+        unsigned long addr = exit_fs_addr + i * sizeof(u32);
+        if (safe_read_kernel(&insn, (void *)addr, sizeof(insn)))
+            break;
+
+        // --- LDR (immediate) ---
+        if ((insn & 0xFFC00000) == 0xF9400000) {
+            int rn = (insn >> 5) & 0x1F;
+            int imm = (insn >> 10) & 0xFFF;
+            if (rn == 0) {
+                offset = imm * 8;
+                log_boot("[+] Found fs_struct offset via ldr: %d\n", offset);
+                return offset;
+            }
+        }
+
+        // --- STR (immediate) ---
+        else if ((insn & 0xFFC00000) == 0xF9000000) {
+            int rn = (insn >> 5) & 0x1F;
+            int imm = (insn >> 10) & 0xFFF;
+            if (rn == 0) {
+                offset = imm * 8;
+                log_boot("[+] Found fs_struct offset via str: %d\n", offset);
+                return offset;
+            }
+        }
+
+        // --- LDP / STP (immediate) ---
+        else if ((insn & 0xFFC00000) == 0xA9400000 || // ldp
+                 (insn & 0xFFC00000) == 0xA9000000) {  // stp
+            int rn = (insn >> 5) & 0x1F;
+            int imm = (insn >> 15) & 0x7F;
+            if (rn == 0) {
+                offset = imm * 8;
+                log_boot("[+] Found fs_struct offset via ldp/stp: %d\n", offset);
+                return offset;
+            }
+        }
+
+        // --- ADD (immediate) ---
+        else if ((insn & 0xFFC00000) == 0x91000000) {
+            int rn = (insn >> 5) & 0x1F;
+            int imm = (insn >> 10) & 0xFFF;
+            if (rn == 0) {
+                offset = imm;
+                log_boot("[+] Found fs_struct offset via add: %d\n", offset);
+                return offset;
+            }
+        }
+
+        // --- LDUR (unscaled offset) ---
+        else if ((insn & 0xFFC00000) == 0xF8400000) {
+            int rn = (insn >> 5) & 0x1F;
+            int imm = (insn >> 12) & 0x1FF;
+            if (rn == 0) {
+                offset = imm;
+                log_boot("[+] Found fs_struct offset via ldur: %d\n", offset);
+                return offset;
+            }
+        }
+    }
+
+    log_boot("[-] fs_struct offset not found in exit_fs\n");
+    return -1;
+}
+
 static int discover_all_offsets(void)
 {
     struct task_struct *init_task;
@@ -349,7 +447,12 @@ static int discover_all_offsets(void)
         return -EFAULT;
     }
     init_task = (struct task_struct *)init_task_addr;
-    fs = (struct fs_struct *)((char *)init_task + task_struct_offset.fs_offset);
+    int fs_offset = find_fs_offset_from_exit_fs();
+    if (fs_offset < 0) {
+        log_boot("[-] Failed to find fs_struct offset\n");
+        return -1;
+    }
+    fs = (struct fs_struct *)((char *)init_task + fs_offset);
 
     if (discover_fs_struct_offsets(fs) != 0) {
         return -1;
@@ -379,8 +482,17 @@ int hide_mounts_init(void)
 
     log_boot("[+] Initializing hide_mounts module...\n");
 
+    copy_from_kernel_nofault_fn = (copy_from_kernel_nofault_t)kallsyms_lookup_name("copy_from_kernel_nofault");
+    if (!copy_from_kernel_nofault_fn) {
+        probe_kernel_read_fn = (probe_kernel_read_t)kallsyms_lookup_name("probe_kernel_read")
+        if (!probe_kernel_read_fn) {
+            log_boot("[-] Failed to get copy_from_kernel_nofault and probe_kernel_read. Aborting hooks in hide_mount.\n");
+            return -1;
+        }
+    }
+
     if (discover_all_offsets() != 0) {
-        log_boot("[-] Failed to discover critical kernel offsets. Aborting hooks.\n");
+        log_boot("[-] Failed to discover critical kernel offsets. Aborting hooks in hide_mount.\n");
         return -1;
     }
 

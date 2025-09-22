@@ -457,20 +457,6 @@ int resolve_task_offset()
     }
     log_boot("    active_mm offset: %x\n", task_struct_offset.active_mm_offset);
 
-    // fs
-    struct fs_struct *init_fs = (struct fs_struct *)kallsyms_lookup_name("init_fs");
-    if (init_fs) {
-        for (uintptr_t i = (uintptr_t)task; i < (uintptr_t)task + TASK_STRUCT_MAX_SIZE; i += sizeof(uintptr_t)) {
-            uintptr_t fs_ptr = *(uintptr_t *)i;
-            if (fs_ptr == (uintptr_t)init_fs) {
-                task_struct_offset.fs_offset = i - (uintptr_t)task;
-                break;
-            }
-        }
-    }
-    log_boot("    fs offset: %x\n", task_struct_offset.fs_offset);
-
-
     revert_current(backup);
     vfree(task);
     return 0;
