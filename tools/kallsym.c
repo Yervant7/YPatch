@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* 
  * Copyright (C) 2023 bmax121. All Rights Reserved.
- * Copyright (C) 2025 Yervant7. All Rights Reserved.
  */
 
 #define _GNU_SOURCE
@@ -476,65 +475,6 @@ static int find_num_syms(kallsym_t *info, char *img, int32_t imglen)
     return 0;
 }
 
-static int find_tables_by_num_syms(kallsym_t *info, char *img, int32_t imglen)
-{
-    if (!info->kallsyms_num_syms_offset) return -1;
-
-    info->has_relative_base = (info->version.major > 4 || (info->version.major == 4 && info->version.minor >= 6));
-
-    int32_t pos = info->kallsyms_num_syms_offset;
-    while (pos > 0 && img[pos - 1] == 0) pos--;
-
-    if (pos & 3) {
-        pos &= ~3;
-        if (pos < 0) return -1;
-    }
-
-    if (info->has_relative_base) {
-        int32_t relative_base_size = get_addresses_elem_size(info);
-        pos -= relative_base_size;
-        if (pos < 0) return -1;
-        /* sanity-check: relative_base must be a kernel VA */
-        uint64_t rb = uint_unpack(img + pos, relative_base_size, info->is_be);
-        if ((rb & 0xffff000000000000ULL) != 0xffff000000000000ULL) {
-            /* table does not exist, fall back to absolute addresses */
-            info->has_relative_base = 0;
-            goto absolute_addrs;
-        }
-        info->kallsyms_relative_base_offset = pos;
-        info->relative_base = uint_unpack(img + pos, relative_base_size, info->is_be);
-        
-        while (pos > 0 && img[pos - 1] == 0) pos--;
-
-        int32_t offsets_size = info->kallsyms_num_syms * get_offsets_elem_size(info);
-        pos -= offsets_size;
-        if (pos < 0) return -1;
-        info->kallsyms_offsets_offset = pos;
-
-        if (info->kallsyms_offsets_offset + offsets_size > info->kallsyms_relative_base_offset) {
-             tools_logw("Deterministic calculation resulted in overlapping tables. Failing.\n");
-             return -1;
-        }
-
-        tools_logi("Determined kallsyms_offsets offset: 0x%08x\n", info->kallsyms_offsets_offset);
-        tools_logi("Determined kallsyms_relative_base offset: 0x%08x, value: 0x%llx\n", info->kallsyms_relative_base_offset, info->relative_base);
-    } else {
-absolute_addrs:
-        {
-            int32_t addrs_size = info->kallsyms_num_syms * get_addresses_elem_size(info);
-            pos -= addrs_size;
-            if (pos < 0) return -1;
-            info->kallsyms_addresses_offset = pos;
-            tools_logi("Determined kallsyms_addresses offset: 0x%08x\n", info->kallsyms_addresses_offset);
-
-            int32_t elem = get_addresses_elem_size(info);
-            info->kernel_base = uint_unpack(img + pos, elem, info->is_be);
-            tools_logi("kernel base address: 0x%016llx\n", info->kernel_base);
-        }
-    }
-    return 0;
-}
-
 static int find_markers_internal(kallsym_t *info, char *img, int32_t imglen, int32_t elem_size)
 {
     int32_t cand = info->kallsyms_token_table_offset;
@@ -782,76 +722,71 @@ static int correct_addresses_or_offsets_by_vectors(kallsym_t *info, char *img, i
 static int correct_addresses_or_offsets_by_banner(kallsym_t *info, char *img, int32_t imglen)
 {
     int32_t pos = info->kallsyms_names_offset;
-    int32_t banner_symbol_index = -1;
+    int32_t index = 0;
     char symbol[KSYM_SYMBOL_LEN] = { '\0' };
 
-    for (int32_t i = 0; pos < info->kallsyms_markers_offset && i < info->kallsyms_num_syms; i++) {
+    while (pos < info->kallsyms_markers_offset) {
         memset(symbol, 0, sizeof(symbol));
-        if (decompress_symbol_name(info, img, &pos, NULL, symbol) != 0) return -1;
-        if (strcmp(symbol, "linux_banner") == 0) {
-            tools_logi("names table linux_banner index: 0x%08x\n", i);
-            banner_symbol_index = i;
+        int32_t ret = decompress_symbol_name(info, img, &pos, NULL, symbol);
+        if (ret) return ret;
+
+        if (!strcmp(symbol, "linux_banner")) {
+            tools_logi("names table linux_banner index: 0x%08x\n", index);
+            break;
+        }
+        if (!strcmp(symbol, "pid_vnr")) {
+        }
+        index++;
+    }
+
+    if (pos >= info->kallsyms_markers_offset) {
+        tools_loge("no linux_banner in names table\n");
+        return -1;
+    }
+    info->symbol_banner_idx = -1;
+
+    // find correct addresses or offsets
+    for (int i = 0; i < info->banner_num; i++) {
+        int32_t target_offset = info->linux_banner_offset[i];
+
+        int32_t elem_size = info->has_relative_base ? get_offsets_elem_size(info) : get_addresses_elem_size(info);
+        pos = info->_approx_addresses_or_offsets_offset;
+
+        int32_t end = pos + 4096 + elem_size;
+        for (; pos < end; pos += elem_size) {
+            uint64_t base = uint_unpack(img + pos, elem_size, info->is_be);
+            int32_t offset = uint_unpack(img + pos + index * elem_size, elem_size, info->is_be) - base;
+            if (offset == target_offset) break;
+        }
+        if (pos < end) {
+            info->symbol_banner_idx = i;
+            tools_logi("linux_banner index: %d\n", i);
             break;
         }
     }
-
-    if (banner_symbol_index < 0) {
-        tools_loge("no linux_banner in names table\n");
+    if (info->symbol_banner_idx < 0) {
+        tools_loge("correct address or offsets error\n");
         return -1;
     }
 
     int32_t elem_size = info->has_relative_base ? get_offsets_elem_size(info) : get_addresses_elem_size(info);
 
-    for (int banner_idx = 0; banner_idx < info->banner_num; banner_idx++) {
-        int32_t banner_file_offset = info->linux_banner_offset[banner_idx];
-
-        int32_t search_start = info->_approx_addresses_or_offsets_offset > 4096 ? info->_approx_addresses_or_offsets_offset - 4096 : 0;
-        int32_t search_end = info->_approx_addresses_or_offsets_offset + 4096;
-        if (search_end > imglen) search_end = imglen;
-
-        for (pos = search_start; pos < search_end; pos += elem_size) {
-            
-            int64_t banner_addr_or_offset_from_table = int_unpack(img + pos + (int64_t)banner_symbol_index * elem_size, elem_size, info->is_be);
-
-            uint64_t calculated_file_offset = -1;
-            int found = 0;
-
-            if (info->has_relative_base) {
-                if (banner_addr_or_offset_from_table == banner_file_offset) {
-                    found = 1;
-                }
-            } else {
-                uint64_t guessed_base = banner_addr_or_offset_from_table - banner_file_offset;
-                if ((guessed_base & 0xffff000000000000ULL) == 0xffff000000000000ULL) {
-                     info->kernel_base = guessed_base;
-                     found = 1;
-                }
-            }
-            
-            if (found) {
-                info->symbol_banner_idx = banner_idx;
-                tools_logi("Heuristic match found for linux_banner index: %d\n", banner_idx);
-                
-                if (info->has_relative_base) {
-                    info->kallsyms_offsets_offset = pos;
-                    tools_logi("kallsyms_offsets offset (heuristic): 0x%08x\n", pos);
-                } else {
-                    info->kallsyms_addresses_offset = pos;
-                    tools_logi("kallsyms_addresses offset (heuristic): 0x%08x\n", pos);
-                    tools_logi("kernel base address (heuristic): 0x%llx\n", info->kernel_base);
-                }
-                int32_t pid_vnr_offset = get_symbol_offset(info, img, "pid_vnr");
-                if (pid_vnr_offset >= 0) {
-                     arm64_verify_pid_vnr(info, img, pid_vnr_offset);
-                }
-                return 0;
-            }
-        }
+    if (info->has_relative_base) {
+        info->kallsyms_offsets_offset = pos;
+        tools_logi("kallsyms_offsets offset: 0x%08x\n", pos);
+    } else {
+        info->kallsyms_addresses_offset = pos;
+        tools_logi("kallsyms_addresses offset: 0x%08x\n", pos);
+        info->kernel_base = uint_unpack(img + info->kallsyms_addresses_offset, elem_size, info->is_be);
+        tools_logi("kernel base address: 0x%llx\n", info->kernel_base);
     }
 
-    info->kernel_base = 0;
-    tools_loge("Heuristic correction by banner failed\n");
-    return -1;
+    int32_t pid_vnr_offset = get_symbol_offset(info, img, "pid_vnr");
+    if (arm64_verify_pid_vnr(info, img, pid_vnr_offset)) {
+        tools_logw("pid_vnr verification failed\n");
+    }
+
+    return 0;
 }
 
 static int correct_addresses_or_offsets(kallsym_t *info, char *img, int32_t imglen)
@@ -867,99 +802,6 @@ static int correct_addresses_or_offsets(kallsym_t *info, char *img, int32_t imgl
     }
     if (rc) rc = correct_addresses_or_offsets_by_vectors(info, img, imglen);
     return rc;
-}
-
-static int find_addresses_or_offsets_hybrid(kallsym_t *info, char *img, int32_t imglen)
-{
-    tools_logi("Attempting deterministic table discovery...\n");
-    if (find_tables_by_num_syms(info, img, imglen) == 0) {
-        if(info->has_relative_base) {
-            int negative_count = 0;
-            for (int i = 0; i < info->kallsyms_num_syms; i++) {
-                int64_t offset = int_unpack(img + info->kallsyms_offsets_offset + i * get_offsets_elem_size(info), get_offsets_elem_size(info), info->is_be);
-                if (offset < 0) negative_count++;
-            }
-            if (negative_count > info->kallsyms_num_syms / 2) {
-                info->has_absolute_percpu = 1;
-                tools_logi("kallsyms_absolute_percpu detected\n");
-            }
-        }
-        tools_logi("Deterministic discovery successful.\n");
-        return 0;
-    }
-
-    tools_logw("Deterministic discovery failed. Falling back to heuristic method.\n");
-    
-    int rc = find_approx_addresses_or_offset(info, img, imglen);
-    if (rc) {
-        return rc;
-    }
-    
-    return correct_addresses_or_offsets(info, img, imglen);
-}
-
-static int resolve_symbol_tables(kallsym_t *info, char *img, int32_t imglen)
-{
-    if (find_approx_addresses_or_offset(info, img, imglen) != 0) return -1;
-    if (find_num_syms(info, img, imglen) != 0) {
-         tools_logw("Could not find exact kallsyms_num_syms, heuristic correction will be essential.\n");
-    }
-
-    tools_logi("Attempting deterministic table discovery (modern kernel layout)...\n");
-
-    kallsym_t temp_info = *info; 
-    
-    if (find_tables_by_num_syms(&temp_info, img, imglen) == 0) {
-
-        tools_logi("Deterministic method produced a candidate layout. Validating...\n");
-
-        int32_t vector_index = -1;
-        char symbol[KSYM_SYMBOL_LEN] = {0};
-        int32_t pos = temp_info.kallsyms_names_offset;
-
-        if (temp_info.kernel_base == 0 || temp_info.kernel_base == -1) {
-            temp_info.kernel_base = temp_info.relative_base;
-        }
-
-        if (temp_info.kernel_base != 0 && temp_info.kernel_base != -1) {
-            for (int32_t i = 0; i < temp_info.kallsyms_num_syms; i++) {
-                memset(symbol, 0, sizeof(symbol));
-                if (decompress_symbol_name(&temp_info, img, &pos, NULL, symbol) != 0) break;
-                if (strcmp(symbol, "vectors") == 0) {
-                    vector_index = i;
-                    break;
-                }
-            }
-            
-            if (vector_index != -1) {
-                int32_t vector_offset = get_symbol_index_offset(&temp_info, img, vector_index);
-                /* kernel >= 6.2 may use CONFIG_ARM64_RELOC_TEST, vectors is
-                 * only 64-byte aligned.  Keep the old 2 kB check for < 6.2
-                 */
-                int align = (info->version.major > 6 || (info->version.major == 6 && info->version.minor >= 2)) ? 64 : 0x800;
-                if (vector_offset > 0 && (vector_offset % align) == 0) {
-                    tools_logi("Validation successful (vectors @ 0x%x). Using deterministic results.\n", vector_offset);
-                    *info = temp_info;
-
-                    if(info->has_relative_base) {
-                        int negative_count = 0;
-                        for (int i = 0; i < info->kallsyms_num_syms; i++) {
-                            int64_t offset_val = int_unpack(img + info->kallsyms_offsets_offset + i * get_offsets_elem_size(info), get_offsets_elem_size(info), info->is_be);
-                            if (offset_val < 0) negative_count++;
-                        }
-                        if (negative_count > info->kallsyms_num_syms / 2) {
-                            info->has_absolute_percpu = 1;
-                            tools_logi("kallsyms_absolute_percpu detected\n");
-                        }
-                    }
-                    return 0;
-                }
-            }
-        }
-    }
-
-    tools_logw("Deterministic method failed or was not validated. Falling back to heuristic correction method.\n");
-    return correct_addresses_or_offsets(info, img, imglen);
 }
 
 void init_arm64_kallsym_t(kallsym_t *info)
@@ -985,10 +827,8 @@ static int retry_relo(kallsym_t *info, char *img, int32_t imglen)
 {
     int rc = -1;
     static int32_t (*funcs[])(kallsym_t *, char *, int32_t) = {
-        try_find_arm64_relo_table,
-        find_markers,
-        find_names,
-        resolve_symbol_tables
+        try_find_arm64_relo_table,   find_markers, find_approx_addresses_or_offset, find_names, find_num_syms,
+        correct_addresses_or_offsets
     };
 
     for (int i = 0; i < (int)(sizeof(funcs) / sizeof(funcs[0])); i++) {
@@ -1048,12 +888,6 @@ int analyze_kallsym_info(kallsym_t *info, char *img, int32_t imglen, enum arch_t
     }
 
 out:
-    if (!rc && info->has_relative_base && (info->kernel_base == 0 || info->kernel_base == -1)) {
-        if (info->relative_base != 0) {
-            info->kernel_base = info->relative_base;
-            tools_logi("Final fix: set kernel_base to relative_base: 0x%016" PRIx64 "\n", info->kernel_base);
-        }
-    }
     memcpy(img, copied_img, imglen);
     free(copied_img);
     return rc;
@@ -1061,49 +895,18 @@ out:
 
 int32_t get_symbol_index_offset(kallsym_t *info, char *img, int32_t index)
 {
-    if (index < 0 || index >= info->kallsyms_num_syms) {
-        return -1;
+    int32_t elem_size;
+    int32_t pos;
+    if (info->has_relative_base) {
+        elem_size = get_offsets_elem_size(info);
+        pos = info->kallsyms_offsets_offset;
+    } else {
+        elem_size = get_addresses_elem_size(info);
+        pos = info->kallsyms_addresses_offset;
     }
-
-    if (info->kallsyms_offsets_offset != 0) {
-        int32_t elem_size = get_offsets_elem_size(info);
-        int32_t pos = info->kallsyms_offsets_offset;
-        
-        int64_t offset_from_table = int_unpack(img + pos + (int64_t)index * elem_size, elem_size, info->is_be);
-
-        uint64_t base_address = info->relative_base ? info->relative_base : info->kernel_base;
-        
-        if (base_address == 0) {
-            return -1;
-        }
-
-        uint64_t virtual_addr;
-        if (info->has_absolute_percpu && offset_from_table < 0) {
-            virtual_addr = base_address - 1 - offset_from_table;
-        } else {
-            virtual_addr = base_address + offset_from_table;
-        }
-
-        if (virtual_addr < info->kernel_base) return -1;
-        return (int32_t)(virtual_addr - info->kernel_base);
-
-    } 
-
-    else if (info->kallsyms_addresses_offset != 0) {
-        int32_t elem_size = get_addresses_elem_size(info);
-        int32_t pos = info->kallsyms_addresses_offset;
-        
-        uint64_t target_addr = uint_unpack(img + pos + (int64_t)index * elem_size, elem_size, info->is_be);
-        
-        if (info->kernel_base == 0) {
-             info->kernel_base = uint_unpack(img + pos, elem_size, info->is_be);
-        }
-
-        if (target_addr < info->kernel_base) return -1;
-        return (int32_t)(target_addr - info->kernel_base);
-    }
-
-    return -1;
+    uint64_t target = uint_unpack(img + pos + index * elem_size, elem_size, info->is_be);
+    if (info->has_relative_base) return target;
+    return (int32_t)(target - info->kernel_base);
 }
 
 int get_symbol_offset_and_size(kallsym_t *info, char *img, char *symbol, int32_t *size)
