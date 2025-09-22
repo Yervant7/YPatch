@@ -9,12 +9,6 @@
 #include <stdint.h>
 #include <log.h>
 
-// Branch prediction hints for hot paths
-#define HOT_PATH __attribute__((hot))
-#define COLD_PATH __attribute__((cold))
-#define ALWAYS_INLINE __attribute__((always_inline))
-#define NOINLINE __attribute__((noinline))
-
 #define HOOK_INTO_BRANCH_FUNC
 
 typedef enum
@@ -55,11 +49,6 @@ typedef int8_t chain_item_state;
 #define FP_HOOK_CHAIN_NUM 0x20
 
 #define ARM64_NOP 0xd503201f
-
-// Cache-friendly instruction patterns with alignment
-#define INSTR_PATTERN_ALIGN 64
-#define CACHE_LINE_SIZE 64
-#define PREFETCH_DISTANCE 4
 #define ARM64_BTI_C 0xd503245f
 #define ARM64_BTI_J 0xd503249f
 #define ARM64_BTI_JC 0xd50324df
