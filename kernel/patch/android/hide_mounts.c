@@ -484,7 +484,7 @@ int hide_mounts_init(void)
 
     copy_from_kernel_nofault_fn = (copy_from_kernel_nofault_t)kallsyms_lookup_name("copy_from_kernel_nofault");
     if (!copy_from_kernel_nofault_fn) {
-        probe_kernel_read_fn = (probe_kernel_read_t)kallsyms_lookup_name("probe_kernel_read")
+        probe_kernel_read_fn = (probe_kernel_read_t)kallsyms_lookup_name("probe_kernel_read");
         if (!probe_kernel_read_fn) {
             log_boot("[-] Failed to get copy_from_kernel_nofault and probe_kernel_read. Aborting hooks in hide_mount.\n");
             return -1;

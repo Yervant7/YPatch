@@ -520,15 +520,17 @@ static int find_tables_by_num_syms(kallsym_t *info, char *img, int32_t imglen)
         tools_logi("Determined kallsyms_relative_base offset: 0x%08x, value: 0x%llx\n", info->kallsyms_relative_base_offset, info->relative_base);
     } else {
 absolute_addrs:
-        int32_t addrs_size = info->kallsyms_num_syms * get_addresses_elem_size(info);
-        pos -= addrs_size;
-        if (pos < 0) return -1;
-        info->kallsyms_addresses_offset = pos;
-        tools_logi("Determined kallsyms_addresses offset: 0x%08x\n", info->kallsyms_addresses_offset);
+        {
+            int32_t addrs_size = info->kallsyms_num_syms * get_addresses_elem_size(info);
+            pos -= addrs_size;
+            if (pos < 0) return -1;
+            info->kallsyms_addresses_offset = pos;
+            tools_logi("Determined kallsyms_addresses offset: 0x%08x\n", info->kallsyms_addresses_offset);
 
-        int32_t elem = get_addresses_elem_size(info);
-        info->kernel_base = uint_unpack(img + pos, elem, info->is_be);
-        tools_logi("kernel base address: 0x%016llx\n", info->kernel_base);
+            int32_t elem = get_addresses_elem_size(info);
+            info->kernel_base = uint_unpack(img + pos, elem, info->is_be);
+            tools_logi("kernel base address: 0x%016llx\n", info->kernel_base);
+        }
     }
     return 0;
 }
